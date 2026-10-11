@@ -33,6 +33,15 @@ type server struct {
 	jobMu sync.Mutex
 }
 
+func logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		started := time.Now()
+		fmt.Printf("HTTP request: %s %s origin=%q\n", r.Method, r.URL.Path, r.Header.Get("Origin"))
+		next.ServeHTTP(w, r)
+		fmt.Printf("HTTP complete: %s %s duration=%s\n", r.Method, r.URL.Path, time.Since(started).Round(time.Millisecond))
+	})
+}
+
 func extensionOrigin(origin string) bool {
 	return strings.HasPrefix(origin, "moz-extension://") ||
 		strings.HasPrefix(origin, "chrome-extension://")
@@ -173,7 +182,7 @@ func main() {
 	mux.HandleFunc("/speak", s.speak)
 	httpServer := &http.Server{
 		Addr:              *addr,
-		Handler:           mux,
+		Handler:           logRequests(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	fmt.Printf("Model: %s\nPiper: %s\nLocal TTS server: http://%s\n", *model, *piper, *addr)
