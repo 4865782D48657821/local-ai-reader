@@ -1,0 +1,128 @@
+const button = document.getElementById("read");
+const status = document.getElementById("status");
+
+button.addEventListener("click", async () => {
+  status.textContent = "Artikel wird lokal extrahiert …";
+
+  try {
+    const [tab] = await chrome.tabs.query({
+      active: true,
+      currentWindow: true
+    });
+
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        const selectors = [
+          "article",
+          "main",
+          '[role="main"]'
+        ];
+
+        let best = document.body;
+        for (const selector of selectors) {
+          const candidate = document.querySelector(selector);
+          if (candidate && candidate.innerText.length > best.innerText.length * 0.5) {
+            best = candidate;
+            break;
+          }
+        }
+
+        return {
+          title: document.title,
+          text: best.innerText
+            .replace(/\n{3,}/g, "\n\n")
+            .trim()
+            .slice(0, 100000)
+        };
+      }
+    });
+
+    if (!result?.text) throw new Error("Kein Artikeltext gefunden.");
+
+    await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: async ({ title, text }) => {
+        document.getElementById("local-reader-overlay")?.remove();
+
+        const overlay = document.createElement("div");
+        overlay.id = "local-reader-overlay";
+        Object.assign(overlay.style, {
+          position: "fixed",
+          inset: "0",
+          zIndex: "2147483647",
+          overflow: "auto",
+          background: "#f7f4ed",
+          color: "#222",
+          padding: "40px max(24px, calc((100vw - 760px) / 2))",
+          font: "18px/1.7 Georgia, serif",
+          boxSizing: "border-box"
+        });
+
+        const close = document.createElement("button");
+        close.textContent = "Schließen";
+        close.style.cssText = "position:fixed;right:20px;top:16px;padding:8px;cursor:pointer";
+        close.onclick = () => overlay.remove();
+
+        const heading = document.createElement("h1");
+        heading.textContent = title;
+
+        const play = document.createElement("button");
+        play.textContent = "Vorlesen";
+        play.style.cssText = "padding:10px 16px;margin:8px 0 20px;cursor:pointer";
+
+        const stop = document.createElement("button");
+        stop.textContent = "Stopp";
+        stop.style.cssText = "padding:10px 16px;margin:8px;cursor:pointer";
+
+        const message = document.createElement("div");
+        message.style.cssText = "font:14px sans-serif;margin:8px 0";
+
+        const article = document.createElement("div");
+        article.style.whiteSpace = "pre-wrap";
+        article.textContent = text;
+
+        let audio;
+        play.onclick = async () => {
+          play.disabled = true;
+          message.textContent = "Sprache wird lokal erzeugt …";
+          try {
+            const response = await fetch("http://127.0.0.1:8765/speak", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ text })
+            });
+            if (!response.ok) throw new Error(await response.text());
+
+            audio?.pause();
+            audio = new Audio(URL.createObjectURL(await response.blob()));
+            audio.onended = () => {
+              message.textContent = "Fertig.";
+              play.disabled = false;
+            };
+            message.textContent = "Wird vorgelesen …";
+            await audio.play();
+          } catch (error) {
+            message.textContent = "Fehler: " + error.message;
+            play.disabled = false;
+          }
+        };
+
+        stop.onclick = () => {
+          audio?.pause();
+          audio.currentTime = 0;
+          play.disabled = false;
+          message.textContent = "Gestoppt.";
+        };
+
+        overlay.append(close, heading, play, stop, message, article);
+        document.body.appendChild(overlay);
+      },
+      args: [result]
+    });
+
+    status.textContent = "Reader geöffnet.";
+  } catch (error) {
+    status.textContent = "Fehler: " + error.message;
+  }
+});

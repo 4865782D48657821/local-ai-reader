@@ -1,0 +1,76 @@
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json
+import os
+import subprocess
+import tempfile
+from pathlib import Path
+import shutil
+
+# An deine Installation anpassen:
+PIPER = shutil.which("piper") or "piper"
+MODEL = str(Path(__file__).resolve().parent / "en_GB-aru-medium.onyx")
+
+class Handler(BaseHTTPRequestHandler):
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "moz-extension://*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+
+    def do_POST(self):
+        if self.path != "/speak":
+            self.send_error(404)
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            data = json.loads(self.rfile.read(length))
+            text = str(data.get("text", "")).strip()
+
+            if not text:
+                self.send_error(400, "Kein Text")
+                return
+            if len(text) > 100_000:
+                self.send_error(413, "Text zu lang")
+                return
+            if not os.path.isfile(PIPER) or not os.path.isfile(MODEL):
+                self.send_error(500, "Piper oder Stimmenmodell nicht gefunden")
+                return
+
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                wav_path = f.name
+
+            try:
+                subprocess.run(
+                    [PIPER, "--model", MODEL, "--output_file", wav_path],
+                    input=text,
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                    timeout=300,
+                )
+
+                with open(wav_path, "rb") as f:
+                    audio = f.read()
+
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/wav")
+                self.send_header("Content-Length", str(len(audio)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(audio)
+            finally:
+                if os.path.exists(wav_path):
+                    os.remove(wav_path)
+
+        except subprocess.CalledProcessError as e:
+            self.send_error(500, e.stderr or "Piper konnte den Text nicht sprechen")
+        except Exception as e:
+            self.send_error(500, str(e))
+
+    def log_message(self, *_):
+        pass
+
+print("Lokaler TTS-Dienst läuft auf http://127.0.0.1:8765")
+HTTPServer(("127.0.0.1", 8765), Handler).serve_forever()
