@@ -26,7 +26,7 @@ Use standard `gofmt` formatting in `server.go`; keep Go names idiomatic and cons
 
 ## Testing Guidelines
 
-No automated framework or coverage threshold is configured. Run `gofmt -w server.go` and validate manually: start the server, confirm Piper/model errors are surfaced, load the extension, extract a representative article, test play/stop/close, and check that long text advances through the short chunks. For server changes, also check invalid JSON, missing text, oversized text, and non-extension origins.
+No automated framework or coverage threshold is configured. Run `gofmt -w server.go` and validate manually: start the server, confirm Piper/model errors are surfaced, load the extension, extract a representative article, test play/stop/close, and check that long text advances through the short chunks while the next chunk is generated during playback. For server changes, also check invalid JSON, missing text, oversized text, and non-extension origins.
 
 ## Commit & Pull Request Guidelines
 

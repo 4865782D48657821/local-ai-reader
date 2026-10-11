@@ -245,7 +245,13 @@ async function sendAudioToTab(tabId, base64, isLast) {
 browser.runtime.onMessage.addListener(message => {
   if (message.type === "START_READER") {
     const chunks = splitIntoChunks(message.text);
-    jobs.set(message.tabId, { chunks, index: 0, stopped: false });
+    jobs.set(message.tabId, {
+      chunks,
+      index: 0,
+      stopped: false,
+      nextAudioPromise: null,
+      controller: new AbortController()
+    });
 
     showReader(message.tabId, message.title, message.text).catch(error => {
       console.error("Reader konnte nicht geöffnet werden:", error);
@@ -256,13 +262,17 @@ browser.runtime.onMessage.addListener(message => {
 
   if (message.type === "STOP_READER") {
     const job = jobs.get(message.tabId);
-    if (job) job.stopped = true;
+    if (job) {
+      job.stopped = true;
+      job.controller.abort();
+    }
     jobs.delete(message.tabId);
     return;
   }
 
   if (message.type === "NEXT_CHUNK") {
     processNextChunk(message.tabId).catch(async error => {
+      if (error.name === "AbortError") return;
       console.error("TTS-Fehler:", error);
       jobs.delete(message.tabId);
 
@@ -291,7 +301,8 @@ async function processNextChunk(tabId) {
   const job = jobs.get(tabId);
   if (!job || job.stopped) return;
 
-  if (job.index >= job.chunks.length) {
+  const nextAudio = await ensureNextChunk(tabId);
+  if (!nextAudio) {
     jobs.delete(tabId);
 
     await browser.scripting.executeScript({
@@ -302,24 +313,46 @@ async function processNextChunk(tabId) {
     return;
   }
 
-  const chunk = job.chunks[job.index++];
-  const isLast = job.index >= job.chunks.length;
-
-  const response = await fetch("http://127.0.0.1:8765/speak", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: chunk })
-  });
-
-  if (!response.ok) {
-    throw new Error(`Lokaler TTS-Dienst: HTTP ${response.status}`);
-  }
-
-  const base64 = base64FromBytes(
-    new Uint8Array(await response.arrayBuffer())
-  );
+  job.nextAudioPromise = null;
 
   if (job.stopped) return;
 
-  await sendAudioToTab(tabId, base64, isLast);
+  await sendAudioToTab(tabId, nextAudio.base64, nextAudio.isLast);
+
+  // Start generating the following section while this one is playing.
+  // The promise is consumed by the NEXT_CHUNK message from onended.
+  ensureNextChunk(tabId).catch(() => {});
+}
+
+function ensureNextChunk(tabId) {
+  const job = jobs.get(tabId);
+  if (!job || job.stopped) return Promise.resolve(null);
+  if (job.nextAudioPromise) return job.nextAudioPromise;
+  if (job.index >= job.chunks.length) return Promise.resolve(null);
+
+  const chunk = job.chunks[job.index++];
+  const isLast = job.index >= job.chunks.length;
+  const promise = fetch("http://127.0.0.1:8765/speak", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: chunk }),
+    signal: job.controller.signal
+  }).then(async response => {
+    if (!response.ok) {
+      throw new Error(`Lokaler TTS-Dienst: HTTP ${response.status}`);
+    }
+
+    return {
+      base64: base64FromBytes(
+        new Uint8Array(await response.arrayBuffer())
+      ),
+      isLast
+    };
+  });
+
+  job.nextAudioPromise = promise;
+  // If the user stops while Piper is working, the promise may never be
+  // consumed. Attach a rejection handler to avoid an unhandled rejection.
+  promise.catch(() => {});
+  return promise;
 }
