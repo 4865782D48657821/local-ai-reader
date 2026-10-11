@@ -109,7 +109,7 @@ func (s *server) speak(w http.ResponseWriter, r *http.Request) {
 		}
 		message := strings.TrimSpace(stderr.String())
 		if message == "" {
-			message = "Piper failed"
+			message = err.Error()
 		}
 		http.Error(w, message, http.StatusInternalServerError)
 		return

@@ -344,16 +344,40 @@ function ensureNextChunk(tabId) {
   if (job.controller) request.signal = job.controller.signal;
 
   const promise = fetch("http://127.0.0.1:8765/speak", request).then(async response => {
+    const responseHeaders = Object.fromEntries(response.headers.entries());
+
+    console.debug("[Local Reader] TTS response", {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders,
+      chunkLength: chunk.length,
+      chunkPreview: chunk.slice(0, 120)
+    });
+
     if (!response.ok) {
-      throw new Error(`Lokaler TTS-Dienst: HTTP ${response.status}`);
+      const errorBody = await response.text();
+      console.error("[Local Reader] TTS server error", {
+        status: response.status,
+        body: errorBody
+      });
+      throw new Error(
+        `Lokaler TTS-Dienst: HTTP ${response.status}: ${errorBody}`
+      );
     }
 
+    const audioBytes = new Uint8Array(await response.arrayBuffer());
+    console.debug("[Local Reader] TTS audio received", {
+      bytes: audioBytes.length,
+      isLast
+    });
+
     return {
-      base64: base64FromBytes(
-        new Uint8Array(await response.arrayBuffer())
-      ),
+      base64: base64FromBytes(audioBytes),
       isLast
     };
+  }).catch(error => {
+    console.error("[Local Reader] TTS request failed", error);
+    throw error;
   });
 
   job.nextAudioPromise = promise;
