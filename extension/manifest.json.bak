@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Lokaler Reader",
+  "version": "1.0",
+  "description": "Artikel lokal extrahieren und mit Piper vorlesen",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["http://127.0.0.1:8765/*"],
+  "action": {
+    "default_title": "Artikel lokal vorlesen",
+    "default_popup": "popup.html"
+  }
+}

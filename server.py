@@ -16,7 +16,7 @@ PIPER = shutil.which("piper") or "piper"
 # Ersetze den Dateinamen durch den Namen deiner Modell-Datei.
 MODEL = Path(__file__).resolve().parent / "en_GB-aru-medium.onnx"
 
-MAX_TEXT_LENGTH = 100_000
+MAX_TEXT_LENGTH = 1000
 
 
 def is_extension_origin(origin: str) -> bool:
