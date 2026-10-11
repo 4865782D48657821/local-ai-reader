@@ -145,7 +145,7 @@ func (s *server) speak(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	defaultModel, _ := filepath.Abs("en_GB-aru-medium.onnx")
+	defaultModel, _ := filepath.Abs("en_US-amy-low.onnx")
 	model := flag.String("model", defaultModel, "path to the Piper ONNX model")
 	piper := flag.String("piper", "piper", "Piper executable")
 	addr := flag.String("addr", "127.0.0.1:8765", "HTTP listen address")
