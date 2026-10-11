@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -27,10 +28,22 @@ type speakRequest struct {
 	Text string `json:"text"`
 }
 
+type piperInput struct {
+	Text       string `json:"text"`
+	OutputFile string `json:"output_file"`
+}
+
+type piperProcess struct {
+	cmd   *exec.Cmd
+	input *bufio.Writer
+	done  chan error
+}
+
 type server struct {
 	piper string
 	model string
 	jobMu sync.Mutex
+	process *piperProcess
 }
 
 func extensionOrigin(origin string) bool {
@@ -41,6 +54,107 @@ func extensionOrigin(origin string) bool {
 func (s *server) cors(w http.ResponseWriter, origin string) {
 	w.Header().Set("Access-Control-Allow-Origin", origin)
 	w.Header().Set("Vary", "Origin")
+}
+
+func (s *server) startPiperLocked() error {
+	cmd := exec.Command(s.piper, "--model", s.model, "--json-input")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = io.Discard
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	process := &piperProcess{
+		cmd:   cmd,
+		input: bufio.NewWriter(stdin),
+		done:  make(chan error, 1),
+	}
+	go func() {
+		process.done <- cmd.Wait()
+	}()
+	s.process = process
+	return nil
+}
+
+func (s *server) stopPiperLocked() {
+	if s.process == nil {
+		return
+	}
+	_ = s.process.cmd.Process.Kill()
+	<-s.process.done
+	s.process = nil
+}
+
+func (s *server) generateLocked(ctx context.Context, text, wavPath string) error {
+	if s.process == nil {
+		if err := s.startPiperLocked(); err != nil {
+			return err
+		}
+	} else {
+		select {
+		case <-s.process.done:
+			s.process = nil
+		default:
+		}
+		if s.process == nil {
+			if err := s.startPiperLocked(); err != nil {
+				return err
+			}
+		}
+	}
+
+	request := piperInput{Text: text, OutputFile: wavPath}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	if _, err := s.process.input.Write(encoded); err != nil {
+		s.stopPiperLocked()
+		return err
+	}
+	if err := s.process.input.WriteByte('\n'); err != nil {
+		s.stopPiperLocked()
+		return err
+	}
+	if err := s.process.input.Flush(); err != nil {
+		s.stopPiperLocked()
+		return err
+	}
+
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	lastSize := int64(0)
+	stablePolls := 0
+	for {
+		select {
+		case <-ctx.Done():
+			s.stopPiperLocked()
+			return ctx.Err()
+		case err := <-s.process.done:
+			s.process = nil
+			if err == nil {
+				return fmt.Errorf("Piper stopped unexpectedly")
+			}
+			return fmt.Errorf("Piper stopped: %w", err)
+		case <-ticker.C:
+			info, statErr := os.Stat(wavPath)
+			if statErr == nil && info.Size() > 44 && info.Size() == lastSize {
+				stablePolls++
+			} else {
+				stablePolls = 0
+			}
+			if statErr == nil {
+				lastSize = info.Size()
+			}
+			if stablePolls >= 2 {
+				return nil
+			}
+		}
+	}
 }
 
 func (s *server) speak(w http.ResponseWriter, r *http.Request) {
@@ -83,12 +197,13 @@ func (s *server) speak(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Piper is deliberately serialized. This prevents two jobs from competing
-	// for RAM and CPU on older machines.
+	// for RAM and CPU on older machines. The Piper process itself stays alive,
+	// so its model is loaded only once for the whole reading session.
 	s.jobMu.Lock()
-	defer s.jobMu.Unlock()
 
 	tempFile, err := os.CreateTemp("", "local-reader-*.wav")
 	if err != nil {
+		s.jobMu.Unlock()
 		http.Error(w, "Could not create temporary audio file", http.StatusInternalServerError)
 		return
 	}
@@ -98,20 +213,14 @@ func (s *server) speak(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, s.piper, "--model", s.model, "--output_file", wavPath)
-	cmd.Stdin = strings.NewReader(text)
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	err = s.generateLocked(ctx, text, wavPath)
+	s.jobMu.Unlock()
+	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			http.Error(w, "Piper timed out", http.StatusGatewayTimeout)
 			return
 		}
-		message := strings.TrimSpace(stderr.String())
-		if message == "" {
-			message = "Piper failed"
-		}
-		http.Error(w, message, http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 

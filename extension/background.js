@@ -27,7 +27,7 @@ function splitLongSentence(sentence, maxLength) {
   return pieces;
 }
 
-function splitIntoChunks(text, maxLength = 320) {
+function splitIntoChunks(text, maxLength = 700) {
   const sentences = text.match(/[^.!?。！？]+[.!?。！？]*/g) || [text];
   const chunks = [];
   let current = "";
@@ -52,6 +52,14 @@ function splitIntoChunks(text, maxLength = 320) {
   }
 
   if (current) chunks.push(current);
+
+  // Start quickly with a short utterance, then use longer utterances to
+  // reduce Piper process/request overhead while playback is underway.
+  if (chunks.length && chunks[0].length > 260) {
+    const first = chunks.shift();
+    chunks.unshift(...splitLongSentence(first, 260));
+  }
+
   return chunks;
 }
 
