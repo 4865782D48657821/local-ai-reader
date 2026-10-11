@@ -263,6 +263,7 @@ browser.runtime.onMessage.addListener(message => {
   }
 
   if (message.type === "STOP_READER") {
+    console.debug("[Local Reader] STOP_READER", { tabId: message.tabId });
     const job = jobs.get(message.tabId);
     if (job) {
       job.stopped = true;
@@ -341,7 +342,19 @@ function ensureNextChunk(tabId) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text: chunk })
   };
-  if (job.controller) request.signal = job.controller.signal;
+  if (job.controller) {
+    request.signal = job.controller.signal;
+    job.controller.signal.addEventListener("abort", () => {
+      console.warn("[Local Reader] TTS request aborted", { tabId, chunkIndex: job.index - 1 });
+    }, { once: true });
+  }
+
+  console.debug("[Local Reader] TTS request started", {
+    tabId,
+    chunkIndex: job.index - 1,
+    chunkLength: chunk.length,
+    isLast
+  });
 
   const promise = fetch("http://127.0.0.1:8765/speak", request).then(async response => {
     const responseHeaders = Object.fromEntries(response.headers.entries());
