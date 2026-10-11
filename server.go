@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -28,19 +27,10 @@ type speakRequest struct {
 	Text string `json:"text"`
 }
 
-type piperProcess struct {
-	cmd        *exec.Cmd
-	input      *bufio.Writer
-	done       chan error
-	outputDir string
-	lastOutput string
-}
-
 type server struct {
 	piper string
 	model string
 	jobMu sync.Mutex
-	process *piperProcess
 }
 
 func extensionOrigin(origin string) bool {
@@ -51,132 +41,6 @@ func extensionOrigin(origin string) bool {
 func (s *server) cors(w http.ResponseWriter, origin string) {
 	w.Header().Set("Access-Control-Allow-Origin", origin)
 	w.Header().Set("Vary", "Origin")
-}
-
-func (s *server) startPiperLocked() error {
-	outputDir, err := os.MkdirTemp("", "local-reader-piper-*")
-	if err != nil {
-		return err
-	}
-	cmd := exec.Command(s.piper, "--model", s.model, "--output_dir", outputDir)
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		os.RemoveAll(outputDir)
-		return err
-	}
-	cmd.Stderr = os.Stderr
-	cmd.Stdout = io.Discard
-	if err := cmd.Start(); err != nil {
-		os.RemoveAll(outputDir)
-		return err
-	}
-
-	process := &piperProcess{
-		cmd:       cmd,
-		input:     bufio.NewWriter(stdin),
-		done:      make(chan error, 1),
-		outputDir: outputDir,
-	}
-	go func() {
-		process.done <- cmd.Wait()
-	}()
-	s.process = process
-	return nil
-}
-
-func (s *server) stopPiperLocked() {
-	if s.process == nil {
-		return
-	}
-	_ = s.process.cmd.Process.Kill()
-	<-s.process.done
-	os.RemoveAll(s.process.outputDir)
-	s.process = nil
-}
-
-func (s *server) generateLocked(ctx context.Context, text, wavPath string) error {
-	if s.process == nil {
-		if err := s.startPiperLocked(); err != nil {
-			return err
-		}
-	} else {
-		select {
-		case <-s.process.done:
-			outputDir := s.process.outputDir
-			s.process = nil
-			os.RemoveAll(outputDir)
-		default:
-		}
-		if s.process == nil {
-			if err := s.startPiperLocked(); err != nil {
-				return err
-			}
-		}
-	}
-
-	if _, err := s.process.input.WriteString(text); err != nil {
-		s.stopPiperLocked()
-		return err
-	}
-	if err := s.process.input.WriteByte('\n'); err != nil {
-		s.stopPiperLocked()
-		return err
-	}
-	if err := s.process.input.Flush(); err != nil {
-		s.stopPiperLocked()
-		return err
-	}
-
-	ticker := time.NewTicker(20 * time.Millisecond)
-	defer ticker.Stop()
-	lastSize := int64(0)
-	stablePolls := 0
-	for {
-		select {
-		case <-ctx.Done():
-			s.stopPiperLocked()
-			return ctx.Err()
-		case err := <-s.process.done:
-			outputDir := s.process.outputDir
-			s.process = nil
-			os.RemoveAll(outputDir)
-			if err == nil {
-				return fmt.Errorf("Piper stopped unexpectedly")
-			}
-			return fmt.Errorf("Piper stopped: %w", err)
-		case <-ticker.C:
-			entries, readErr := os.ReadDir(s.process.outputDir)
-			if readErr != nil {
-				continue
-			}
-			for _, entry := range entries {
-				if entry.IsDir() || filepath.Ext(entry.Name()) != ".wav" {
-					continue
-				}
-				outputPath := filepath.Join(s.process.outputDir, entry.Name())
-				if outputPath == s.process.lastOutput {
-					continue
-				}
-				info, statErr := os.Stat(outputPath)
-				if statErr != nil || info.Size() <= 44 {
-					continue
-				}
-				if info.Size() == lastSize {
-					stablePolls++
-				} else {
-					stablePolls = 0
-				}
-				lastSize = info.Size()
-				if stablePolls >= 2 {
-					if err := os.Rename(outputPath, wavPath); err != nil {
-						return err
-					}
-					s.process.lastOutput = outputPath
-					return nil
-				}
-			}
-		}
-	}
 }
 
 func (s *server) speak(w http.ResponseWriter, r *http.Request) {
@@ -219,13 +83,12 @@ func (s *server) speak(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Piper is deliberately serialized. This prevents two jobs from competing
-	// for RAM and CPU on older machines. The Piper process itself stays alive,
-	// so its model is loaded only once for the whole reading session.
+	// for RAM and CPU on older machines.
 	s.jobMu.Lock()
+	defer s.jobMu.Unlock()
 
 	tempFile, err := os.CreateTemp("", "local-reader-*.wav")
 	if err != nil {
-		s.jobMu.Unlock()
 		http.Error(w, "Could not create temporary audio file", http.StatusInternalServerError)
 		return
 	}
@@ -235,14 +98,20 @@ func (s *server) speak(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), requestTimeout)
 	defer cancel()
-	err = s.generateLocked(ctx, text, wavPath)
-	s.jobMu.Unlock()
-	if err != nil {
+	cmd := exec.CommandContext(ctx, s.piper, "--model", s.model, "--output_file", wavPath)
+	cmd.Stdin = strings.NewReader(text)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			http.Error(w, "Piper timed out", http.StatusGatewayTimeout)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		message := strings.TrimSpace(stderr.String())
+		if message == "" {
+			message = "Piper failed"
+		}
+		http.Error(w, message, http.StatusInternalServerError)
 		return
 	}
 
@@ -275,8 +144,25 @@ func (s *server) speak(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, audio)
 }
 
+func defaultModelPath() string {
+	modelName := "en_GB-aru-medium.onnx"
+	if path, err := filepath.Abs(modelName); err == nil {
+		if _, statErr := os.Stat(path); statErr == nil {
+			return path
+		}
+	}
+	if executable, err := os.Executable(); err == nil {
+		path := filepath.Join(filepath.Dir(executable), modelName)
+		if _, statErr := os.Stat(path); statErr == nil {
+			return path
+		}
+	}
+	path, _ := filepath.Abs(modelName)
+	return path
+}
+
 func main() {
-	defaultModel, _ := filepath.Abs("en_US-amy-low.onnx")
+	defaultModel := defaultModelPath()
 	model := flag.String("model", defaultModel, "path to the Piper ONNX model")
 	piper := flag.String("piper", "piper", "Piper executable")
 	addr := flag.String("addr", "127.0.0.1:8765", "HTTP listen address")
