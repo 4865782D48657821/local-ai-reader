@@ -1,7 +1,6 @@
 const jobs = new Map();
 
-// Keep requests small enough that Piper has a short time-to-first-audio and
-// never needs to hold a long article in its working set.
+// Keep requests below the server limit while preserving complete sentences.
 function splitLongSentence(sentence, maxLength) {
   const pieces = [];
   let current = "";
@@ -27,7 +26,7 @@ function splitLongSentence(sentence, maxLength) {
   return pieces;
 }
 
-function splitIntoChunks(text, maxLength = 700) {
+function splitIntoChunks(text, maxLength = 900) {
   const sentences = text.match(/[^.!?。！？]+[.!?。！？]*/g) || [text];
   const chunks = [];
   let current = "";
@@ -52,13 +51,6 @@ function splitIntoChunks(text, maxLength = 700) {
   }
 
   if (current) chunks.push(current);
-
-  // Start quickly with a short utterance, then use longer utterances to
-  // reduce Piper process/request overhead while playback is underway.
-  if (chunks.length && chunks[0].length > 260) {
-    const first = chunks.shift();
-    chunks.unshift(...splitLongSentence(first, 260));
-  }
 
   return chunks;
 }
