@@ -251,7 +251,9 @@ browser.runtime.onMessage.addListener(message => {
       stopped: false,
       started: false,
       nextAudioPromise: null,
-      controller: new AbortController()
+      controller: typeof AbortController === "function"
+        ? new AbortController()
+        : null
     });
 
     showReader(message.tabId, message.title, message.text).catch(error => {
@@ -265,7 +267,7 @@ browser.runtime.onMessage.addListener(message => {
     const job = jobs.get(message.tabId);
     if (job) {
       job.stopped = true;
-      job.controller.abort();
+      job.controller?.abort();
     }
     jobs.delete(message.tabId);
     return;
@@ -344,12 +346,14 @@ function ensureNextChunk(tabId) {
 
   const chunk = job.chunks[job.index++];
   const isLast = job.index >= job.chunks.length;
-  const promise = fetch("http://127.0.0.1:8765/speak", {
+  const request = {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: chunk }),
-    signal: job.controller.signal
-  }).then(async response => {
+    body: JSON.stringify({ text: chunk })
+  };
+  if (job.controller) request.signal = job.controller.signal;
+
+  const promise = fetch("http://127.0.0.1:8765/speak", request).then(async response => {
     if (!response.ok) {
       throw new Error(`Lokaler TTS-Dienst: HTTP ${response.status}`);
     }
