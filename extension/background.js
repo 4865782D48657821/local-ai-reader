@@ -1,6 +1,33 @@
 const jobs = new Map();
 
-function splitIntoChunks(text, maxLength = 500) {
+// Keep requests small enough that Piper has a short time-to-first-audio and
+// never needs to hold a long article in its working set.
+function splitLongSentence(sentence, maxLength) {
+  const pieces = [];
+  let current = "";
+
+  for (const word of sentence.split(/\s+/)) {
+    if (!word) continue;
+
+    if (word.length > maxLength) {
+      if (current) pieces.push(current);
+      current = "";
+      for (let i = 0; i < word.length; i += maxLength) {
+        pieces.push(word.slice(i, i + maxLength));
+      }
+    } else if (current && current.length + word.length + 1 > maxLength) {
+      pieces.push(current);
+      current = word;
+    } else {
+      current += (current ? " " : "") + word;
+    }
+  }
+
+  if (current) pieces.push(current);
+  return pieces;
+}
+
+function splitIntoChunks(text, maxLength = 320) {
   const sentences = text.match(/[^.!?。！？]+[.!?。！？]*/g) || [text];
   const chunks = [];
   let current = "";
@@ -18,10 +45,7 @@ function splitIntoChunks(text, maxLength = 500) {
     if (part.length > maxLength) {
       if (current) chunks.push(current);
       current = "";
-
-      for (let i = 0; i < part.length; i += maxLength) {
-        chunks.push(part.slice(i, i + maxLength));
-      }
+      chunks.push(...splitLongSentence(part, maxLength));
     } else {
       current += (current ? " " : "") + part;
     }
@@ -29,17 +53,6 @@ function splitIntoChunks(text, maxLength = 500) {
 
   if (current) chunks.push(current);
   return chunks;
-}
-
-function base64FromBytes(bytes) {
-  let binary = "";
-  const size = 0x8000;
-
-  for (let i = 0; i < bytes.length; i += size) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + size));
-  }
-
-  return btoa(binary);
 }
 
 async function showReader(tabId, title, text) {
@@ -146,18 +159,11 @@ async function showReader(tabId, title, text) {
       controls.append(play, stop, status);
       document.body.appendChild(overlay);
 
-      window.__localReaderSetAudio = (base64, isLast) => {
+      window.__localReaderSetAudio = (audioBuffer, isLast) => {
         if (!active) return;
 
-        const binary = atob(base64);
-        const bytes = new Uint8Array(binary.length);
-
-        for (let i = 0; i < binary.length; i++) {
-          bytes[i] = binary.charCodeAt(i);
-        }
-
         const url = URL.createObjectURL(
-          new Blob([bytes], { type: "audio/wav" })
+          new Blob([audioBuffer], { type: "audio/wav" })
         );
 
         audio.onloadeddata = () => {
@@ -176,6 +182,7 @@ async function showReader(tabId, title, text) {
 
         audio.onended = () => {
           URL.revokeObjectURL(url);
+          audio.removeAttribute("src");
           if (!active) return;
 
           if (isLast) {
@@ -207,13 +214,13 @@ async function showReader(tabId, title, text) {
   });
 }
 
-async function sendAudioToTab(tabId, base64, isLast) {
+async function sendAudioToTab(tabId, audioBuffer, isLast) {
   await browser.scripting.executeScript({
     target: { tabId },
-    func: ({ base64, isLast }) => {
-      window.__localReaderSetAudio?.(base64, isLast);
+    func: ({ audioBuffer, isLast }) => {
+      window.__localReaderSetAudio?.(audioBuffer, isLast);
     },
-    args: [{ base64, isLast }]
+    args: [{ audioBuffer, isLast }]
   });
 }
 
@@ -290,11 +297,9 @@ async function processNextChunk(tabId) {
     throw new Error(`Lokaler TTS-Dienst: HTTP ${response.status}`);
   }
 
-  const base64 = base64FromBytes(
-    new Uint8Array(await response.arrayBuffer())
-  );
+  const audioBuffer = await response.arrayBuffer();
 
   if (job.stopped) return;
 
-  await sendAudioToTab(tabId, base64, isLast);
+  await sendAudioToTab(tabId, audioBuffer, isLast);
 }
