@@ -28,15 +28,12 @@ type speakRequest struct {
 	Text string `json:"text"`
 }
 
-type piperInput struct {
-	Text       string `json:"text"`
-	OutputFile string `json:"output_file"`
-}
-
 type piperProcess struct {
-	cmd   *exec.Cmd
-	input *bufio.Writer
-	done  chan error
+	cmd        *exec.Cmd
+	input      *bufio.Writer
+	done       chan error
+	outputDir string
+	lastOutput string
 }
 
 type server struct {
@@ -57,21 +54,28 @@ func (s *server) cors(w http.ResponseWriter, origin string) {
 }
 
 func (s *server) startPiperLocked() error {
-	cmd := exec.Command(s.piper, "--model", s.model, "--json-input")
+	outputDir, err := os.MkdirTemp("", "local-reader-piper-*")
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(s.piper, "--model", s.model, "--output_dir", outputDir)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
+		os.RemoveAll(outputDir)
 		return err
 	}
 	cmd.Stderr = os.Stderr
 	cmd.Stdout = io.Discard
 	if err := cmd.Start(); err != nil {
+		os.RemoveAll(outputDir)
 		return err
 	}
 
 	process := &piperProcess{
-		cmd:   cmd,
-		input: bufio.NewWriter(stdin),
-		done:  make(chan error, 1),
+		cmd:       cmd,
+		input:     bufio.NewWriter(stdin),
+		done:      make(chan error, 1),
+		outputDir: outputDir,
 	}
 	go func() {
 		process.done <- cmd.Wait()
@@ -86,6 +90,7 @@ func (s *server) stopPiperLocked() {
 	}
 	_ = s.process.cmd.Process.Kill()
 	<-s.process.done
+	os.RemoveAll(s.process.outputDir)
 	s.process = nil
 }
 
@@ -97,7 +102,9 @@ func (s *server) generateLocked(ctx context.Context, text, wavPath string) error
 	} else {
 		select {
 		case <-s.process.done:
+			outputDir := s.process.outputDir
 			s.process = nil
+			os.RemoveAll(outputDir)
 		default:
 		}
 		if s.process == nil {
@@ -107,12 +114,7 @@ func (s *server) generateLocked(ctx context.Context, text, wavPath string) error
 		}
 	}
 
-	request := piperInput{Text: text, OutputFile: wavPath}
-	encoded, err := json.Marshal(request)
-	if err != nil {
-		return err
-	}
-	if _, err := s.process.input.Write(encoded); err != nil {
+	if _, err := s.process.input.WriteString(text); err != nil {
 		s.stopPiperLocked()
 		return err
 	}
@@ -135,23 +137,43 @@ func (s *server) generateLocked(ctx context.Context, text, wavPath string) error
 			s.stopPiperLocked()
 			return ctx.Err()
 		case err := <-s.process.done:
+			outputDir := s.process.outputDir
 			s.process = nil
+			os.RemoveAll(outputDir)
 			if err == nil {
 				return fmt.Errorf("Piper stopped unexpectedly")
 			}
 			return fmt.Errorf("Piper stopped: %w", err)
 		case <-ticker.C:
-			info, statErr := os.Stat(wavPath)
-			if statErr == nil && info.Size() > 44 && info.Size() == lastSize {
-				stablePolls++
-			} else {
-				stablePolls = 0
+			entries, readErr := os.ReadDir(s.process.outputDir)
+			if readErr != nil {
+				continue
 			}
-			if statErr == nil {
+			for _, entry := range entries {
+				if entry.IsDir() || filepath.Ext(entry.Name()) != ".wav" {
+					continue
+				}
+				outputPath := filepath.Join(s.process.outputDir, entry.Name())
+				if outputPath == s.process.lastOutput {
+					continue
+				}
+				info, statErr := os.Stat(outputPath)
+				if statErr != nil || info.Size() <= 44 {
+					continue
+				}
+				if info.Size() == lastSize {
+					stablePolls++
+				} else {
+					stablePolls = 0
+				}
 				lastSize = info.Size()
-			}
-			if stablePolls >= 2 {
-				return nil
+				if stablePolls >= 2 {
+					if err := os.Rename(outputPath, wavPath); err != nil {
+						return err
+					}
+					s.process.lastOutput = outputPath
+					return nil
+				}
 			}
 		}
 	}
