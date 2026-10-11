@@ -27,7 +27,7 @@ function splitLongSentence(sentence, maxLength) {
   return pieces;
 }
 
-function splitIntoChunks(text, maxLength = 320) {
+function splitIntoChunks(text, maxLength = 600) {
   const sentences = text.match(/[^.!?。！？]+[.!?。！？]*/g) || [text];
   const chunks = [];
   let current = "";
@@ -249,6 +249,7 @@ browser.runtime.onMessage.addListener(message => {
       chunks,
       index: 0,
       stopped: false,
+      started: false,
       nextAudioPromise: null,
       controller: new AbortController()
     });
@@ -313,7 +314,18 @@ async function processNextChunk(tabId) {
     return;
   }
 
+  // The promise has now been consumed; the slot is free for the following
+  // chunk to be generated in the background.
   job.nextAudioPromise = null;
+
+  // On slow CPUs, prepare one complete hand-off before starting playback.
+  // This adds startup latency but prevents the first transition from
+  // immediately racing Piper.
+  if (!job.started && !nextAudio.isLast) {
+    await ensureNextChunk(tabId);
+  }
+
+  job.started = true;
 
   if (job.stopped) return;
 
