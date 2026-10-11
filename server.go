@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -120,6 +121,17 @@ func (s *server) speak(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer audio.Close()
+	header := make([]byte, 12)
+	if _, err := io.ReadFull(audio, header); err != nil ||
+		!bytes.Equal(header[:4], []byte("RIFF")) ||
+		!bytes.Equal(header[8:12], []byte("WAVE")) {
+		http.Error(w, "Piper produced invalid WAV audio", http.StatusInternalServerError)
+		return
+	}
+	if _, err := audio.Seek(0, io.SeekStart); err != nil {
+		http.Error(w, "Could not read generated audio", http.StatusInternalServerError)
+		return
+	}
 	info, err := audio.Stat()
 	if err != nil {
 		http.Error(w, "Could not inspect generated audio", http.StatusInternalServerError)

@@ -55,6 +55,17 @@ function splitIntoChunks(text, maxLength = 320) {
   return chunks;
 }
 
+function base64FromBytes(bytes) {
+  let binary = "";
+  const size = 0x8000;
+
+  for (let i = 0; i < bytes.length; i += size) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + size));
+  }
+
+  return btoa(binary);
+}
+
 async function showReader(tabId, title, text) {
   await browser.scripting.executeScript({
     target: { tabId },
@@ -159,11 +170,18 @@ async function showReader(tabId, title, text) {
       controls.append(play, stop, status);
       document.body.appendChild(overlay);
 
-      window.__localReaderSetAudio = (audioBuffer, isLast) => {
+      window.__localReaderSetAudio = (base64, isLast) => {
         if (!active) return;
 
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+
+        for (let i = 0; i < binary.length; i++) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+
         const url = URL.createObjectURL(
-          new Blob([audioBuffer], { type: "audio/wav" })
+          new Blob([bytes], { type: "audio/wav" })
         );
 
         audio.onloadeddata = () => {
@@ -214,13 +232,13 @@ async function showReader(tabId, title, text) {
   });
 }
 
-async function sendAudioToTab(tabId, audioBuffer, isLast) {
+async function sendAudioToTab(tabId, base64, isLast) {
   await browser.scripting.executeScript({
     target: { tabId },
-    func: ({ audioBuffer, isLast }) => {
-      window.__localReaderSetAudio?.(audioBuffer, isLast);
+    func: ({ base64, isLast }) => {
+      window.__localReaderSetAudio?.(base64, isLast);
     },
-    args: [{ audioBuffer, isLast }]
+    args: [{ base64, isLast }]
   });
 }
 
@@ -297,9 +315,11 @@ async function processNextChunk(tabId) {
     throw new Error(`Lokaler TTS-Dienst: HTTP ${response.status}`);
   }
 
-  const audioBuffer = await response.arrayBuffer();
+  const base64 = base64FromBytes(
+    new Uint8Array(await response.arrayBuffer())
+  );
 
   if (job.stopped) return;
 
-  await sendAudioToTab(tabId, audioBuffer, isLast);
+  await sendAudioToTab(tabId, base64, isLast);
 }
